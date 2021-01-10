@@ -1,0 +1,24 @@
+obj-m	    := dmap.o
+dmap-objs := 	main.o \
+							mmap_fault_handler.o \
+							mmap_buffer_rbtree.o \
+							mmap_banked_buffer.o \
+							mmap_buffer_hash_table.o \
+							mmap_generational_fifo_buffer.o \
+							mmap_buffer_sync_daemon.o \
+							di-mmap_parameters.o \
+							buffer_runtime_parameters.o \
+							buffer_loadtime_parameters.o \
+							helpers.o \
+							write_tagged_page.o \
+							write_dirty_pages.o \
+							tagged_page.o \
+							dmapfs_dentry.o \
+							dmapfs_file.o \
+							dmapfs_inode.o \
+							dmapfs_lookup.o \
+							dmapfs_main.o \
+							dmapfs_mmap.o \
+							dmapfs_super.o \
+							lpfifo_non_atomic.o \
+							dfifo_non_atomic.o
