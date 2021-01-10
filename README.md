@@ -39,7 +39,3 @@ The following paper presents the design and experimental analysis of FastMap.
 The pdf, slides, and presentation can be found [here](https://www.usenix.org/conference/atc20/presentation/papagiannis).
 
 Please cite this publication if you use/modify/evaluate FastMap.
-
-## Funding 
-
-This work is supported by [EVOLVE](https://www.evolve-h2020.eu/) (Grant Agreement ID: 825061) and [ExaNeSt](http://www.exanest.eu/) (Grant Agreement ID: 671553) EU funded projects.
