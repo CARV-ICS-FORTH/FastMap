@@ -90,7 +90,7 @@ void drain_page(struct tagged_page *drained_page, fifo_buffer_t *buf, bool page_
 		clear_fifo_entry(drained_page, pvr, true);
 		pvr_mk_invalid(pvr);
 
-		pve = (struct pr_vma_entry *)pvr_get_vma(pvr)->pve; 
+		pve = ((struct fastmap_info *)pvr_get_vma(pvr)->vm_private_data)->pve;
 		DMAP_BGON(pve == NULL);
 
 		spin_lock(&pve->pcpu_mapped_lock[pvr_get_cpu(pvr)]);
@@ -135,6 +135,9 @@ void clear_mappings(struct tagged_page *p, struct evictor_tlb *etlb)
 				.address = pvr_get_vaddr(pvr),
 				.flags = PVMW_SYNC,
 			};
+
+			pvmw.pte = NULL;
+			pvmw.ptl = NULL;
 
 			DMAP_BGON(pvmw.vma->vm_mm == NULL);
 
@@ -565,7 +568,7 @@ void remove_mappings(struct tagged_page *p, struct evictor_tlb *etlb)
 		}
 		pvr_mk_invalid(pvr);
 
-		pve = (struct pr_vma_entry *)pvr_get_vma(pvr)->pve;
+		pve = ((struct fastmap_info *)pvr_get_vma(pvr)->vm_private_data)->pve;
 		DMAP_BGON(pve == NULL);
 
 		spin_lock(&pve->pcpu_mapped_lock[pvr_get_cpu(pvr)]);

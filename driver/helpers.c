@@ -39,6 +39,9 @@ void zap_page_from_address_space(struct vm_area_struct *vma, unsigned long addre
 
 	DMAP_BGON(vma->vm_mm == NULL);
 
+	pvmw.pte = NULL;
+	pvmw.ptl = NULL;
+
 	/* If the pte returned is valid, the lock will also be held. */
 	while(page_vma_mapped_walk(&pvmw)){
 		if(pvmw.pte){

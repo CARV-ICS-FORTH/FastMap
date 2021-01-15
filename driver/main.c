@@ -102,6 +102,7 @@ extern void write_bio_tagged_page(struct tagged_page *evicted_page);
 extern void write_dirty_pages(struct pr_vma_data *pvd, void (*__page_cleanup)(struct tagged_page *));
 
 extern void ino_cache_init(void);
+extern int acquire_ksyms(void);
 
 #ifdef USE_HUGEPAGES
 struct page *hugepages[16];
@@ -183,6 +184,7 @@ static int raw_open(struct inode *inode, struct file *filp)
 	const int minor = iminor(inode);
 	struct block_device *bdev;
 	struct pr_vma_data *pvd;
+	struct fastmap_info *fmap_info;
 	int cpu, err;
 
 	if (minor == 0)
@@ -216,6 +218,15 @@ static int raw_open(struct inode *inode, struct file *filp)
 		file_inode(filp)->i_mapping = bdev->bd_inode->i_mapping;
 
 	//filp->private_data = &raw_devices[minor];
+	
+	/* Allocate fastmap_info struct first */
+	fmap_info = kzalloc(sizeof(struct fastmap_info), GFP_KERNEL);
+	DMAP_BGON(fmap_info == NULL);
+	/*
+	 * Since kzalloc is used all fmap_info members are initialized
+	 * to 0, therefore there is no need to set is_fastmap and pve
+	 * to false and NULL respectively
+	 */
 	pvd = kzalloc(sizeof(struct pr_vma_data), GFP_KERNEL);
 	DMAP_BGON(pvd == NULL);
 
@@ -250,7 +261,9 @@ static int raw_open(struct inode *inode, struct file *filp)
 
 	pvd->magic2 = PVD_MAGIC_2;
 
-	filp->private_data = pvd;
+	fmap_info->pvd = pvd;
+
+	filp->private_data = fmap_info;
 
 	mutex_unlock(&raw_mutex);
 
@@ -282,7 +295,7 @@ static int raw_release(struct inode *inode, struct file *filp)
 
 	printk(KERN_ERR "[%s:%s:%d] Calling release\n", __FILE__, __func__, __LINE__);
 
-	pvd = (struct pr_vma_data *)filp->private_data;
+	pvd = ((struct fastmap_info *)filp->private_data)->pvd;
   if(pvd != NULL){
 
 
@@ -858,7 +871,7 @@ int dmap_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
 #if 1
 	struct mm_struct *mm = current->mm;
-	struct pr_vma_data *pvd = (struct pr_vma_data *)file->private_data;
+	struct pr_vma_data *pvd = ((struct fastmap_info *)file->private_data)->pvd;
 	
 	printk(KERN_ERR "Calling msync() .....\n");
 	down_write(&mm->mmap_sem);
@@ -1213,6 +1226,12 @@ static int __init raw_init(void)
 #endif
 
 	memset(&dimmap_buffer, 0, sizeof(dimmap_buffer_t));
+
+	/* Try to find the unexported kernel symbols which we need */
+	if(acquire_ksyms() == -1){
+		printk(KERN_ERR "Could not translate all necessary kernel symbols\n");
+		return -EINVAL;
+	}
 
 	/* Loadtime buffer parameters */
 	init_ld_params(&dimmap_buffer.ld_params);

@@ -237,7 +237,7 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 
 	lower_file = wrapfs_lower_file(file);
 
-	pvd = ((struct wrapfs_file_info*)file->private_data)->pvd;
+	pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
 
 	if(
 		(pvd != NULL) 
@@ -313,7 +313,7 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 	unsigned int radix_tree_id;
 #endif
 
-	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->pvd;
+	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
 
 	if(
 		(pvd != NULL) 
@@ -376,7 +376,7 @@ static long dmap_priority_ioctl(struct file *file, unsigned int cmd, unsigned lo
 {
 #if 0
 	int retval = 0;
-	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->pvd;
+	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
 	struct dmap_page_prio __user *__dpp_p;
 	struct dmap_page_prio __dpp_d;
 	
@@ -487,6 +487,12 @@ static int wrapfs_open(struct inode *inode, struct file *file)
 		goto out_err;
 	}
 
+	((struct wrapfs_file_info *)file->private_data)->fmap_info = kzalloc(sizeof(struct fastmap_info), GFP_KERNEL);
+	if(!((struct wrapfs_file_info *)file->private_data)->fmap_info){
+		err = -ENOMEM;
+		goto out_err;
+	}
+
 	/* open lower object and link wrapfs's file struct to lower's */
 	wrapfs_get_lower_path(file->f_path.dentry, &lower_path);
 	lower_file = dentry_open(&lower_path, file->f_flags, current_cred());
@@ -527,7 +533,7 @@ static int wrapfs_open(struct inode *inode, struct file *file)
 
 		// set it to the private data of the file
 		DMAP_BGON( (pvd->magic1 != PVD_MAGIC_1) || (pvd->magic2 != PVD_MAGIC_2) );
-		((struct wrapfs_file_info*)file->private_data)->pvd = pvd;
+		((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd = pvd;
 	}
 
 	if (IS_ERR(lower_file)) {
@@ -588,11 +594,11 @@ static int wrapfs_file_release(struct inode *inode, struct file *file)
 	
 	lower_file = wrapfs_lower_file(file);
 
-	pvd = ((struct wrapfs_file_info*)file->private_data)->pvd;
+	pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
 	if(pvd != NULL && pvd->is_mmap == true && pvd->is_valid == true && atomic64_read(&pvd->mmaped) == 1){
 
 		if(lower_file)
-			((struct wrapfs_file_info*)file->private_data)->pvd->bk.filp = lower_file;
+			((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd->bk.filp = lower_file;
 		else
 			DMAP_BGON(1);
 
@@ -613,12 +619,12 @@ static int wrapfs_file_release(struct inode *inode, struct file *file)
 
 		for(i = 0; i < MAX_OPEN_FDS; ++i){
 			if(pvd->open_fds[i] != NULL && pvd->open_fds[i]->f_inode != NULL){
-				((struct wrapfs_file_info*)file->private_data)->pvd->bk.filp = pvd->open_fds[i];
+				((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd->bk.filp = pvd->open_fds[i];
 				break;
 			}
 		}
 
-		((struct wrapfs_file_info*)file->private_data)->pvd = NULL;
+		((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd = NULL;
 	}else if(pvd != NULL){
 		for(i = 0; i < MAX_OPEN_FDS; ++i)
 			if(pvd->open_fds[i] == lower_file){
@@ -644,7 +650,7 @@ static int wrapfs_fsync(struct file *file, loff_t start, loff_t end, int datasyn
 	struct dentry *dentry = file->f_path.dentry;
 	struct pr_vma_data *pvd;
 
-	pvd = ((struct wrapfs_file_info*)file->private_data)->pvd;
+	pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
 	if(pvd == NULL)
 		goto mmap_fsync;
 	
@@ -712,7 +718,7 @@ wrapfs_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	struct file *file = iocb->ki_filp, *lower_file;
 
 #ifdef DEBUG_DIRECT_RW
-	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->pvd;
+	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
 	if(pvd != NULL){
 		DMAP_BGON( (pvd->magic1 != PVD_MAGIC_1) || (pvd->magic2 != PVD_MAGIC_2) );
 		WARN(atomic64_read(&pvd->cnt) > 0, "[%s:%s:%d][%ld]\n", __FILE__, __func__, __LINE__, atomic64_read(&pvd->cnt));
@@ -750,7 +756,7 @@ wrapfs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	struct file *file = iocb->ki_filp, *lower_file;
 
 #ifdef DEBUG_DIRECT_RW
-	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->pvd;
+	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
 	if(pvd != NULL){
 		DMAP_BGON( (pvd->magic1 != PVD_MAGIC_1) || (pvd->magic2 != PVD_MAGIC_2) );
 		WARN(atomic64_read(&pvd->cnt) > 0, "[%s:%s:%d][%ld]\n", __FILE__, __func__, __LINE__, atomic64_read(&pvd->cnt));
