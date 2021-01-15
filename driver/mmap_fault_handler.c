@@ -350,7 +350,7 @@ static void dmap_add_or_update_rmap(struct vm_fault *vmf, struct pr_vma_data *pv
 	struct vm_area_struct *vma = vmf->vma;
 	struct fastmap_info *fmap_info = (struct fastmap_info *)vma->vm_private_data;
 
-	pve = fmap_info->pve
+	pve = fmap_info->pve;
 
 	spin_lock(&tagged_page->rmap_lock);
 	for(i = 0; i < MAX_RMAPS_PER_PAGE; i++){
@@ -1171,11 +1171,16 @@ static const char *perma_name(struct vm_area_struct *vma)
 
 static int perma_split(struct vm_area_struct *area, unsigned long addr)
 {
+	bool fmap;
+	struct pr_vma_entry *pve;
+	struct pr_vma_data *pvd;
+
 	struct fastmap_info *fmap_info = (struct fastmap_info *)area->vm_private_data;
 	DMAP_BGON(fmap_info == NULL);
-	bool fmap = fmap_info->is_fastmap;
-	struct pr_vma_entry *pve = fmap_info->pve;
-	struct pr_vma_data *pvd = fmap_info->pvd;
+
+	fmap = fmap_info->is_fastmap;
+	pve = fmap_info->pve;
+	pvd = fmap_info->pvd;
 
 	printk(KERN_ERR "[%s:%s:%d]is[%d]pvd[%p]pve[%p]addr[%lu]\n", __FILE__, __func__, __LINE__, fmap, pvd, pve, addr);
 	return 0; 
