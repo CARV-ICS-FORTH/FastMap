@@ -1321,4 +1321,4 @@ module_init(raw_init);
 module_exit(raw_exit);
 
 MODULE_AUTHOR("Anastasios Papagiannis <apapag@ics.forth.gr>");
-MODULE_LICENSE("LGPL-2.1");
+MODULE_LICENSE("GPL");
