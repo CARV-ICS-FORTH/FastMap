@@ -4,7 +4,7 @@ This library provides an optimized memory-mapped I/O path inside the Linux kerne
 
 ## Prerequisites
 
-FastMap runs on a modified version of Linux 4.14. To build and run this version of FastMap you can clone this kernel with:
+The main branch of FastMap runs on a modified version of Linux 4.14. To build and run this version of FastMap you can clone this kernel with:
 ```bash
 git clone https://github.com/tpapagian/linux-4.14.72-spf.git -b fastmap
 ```
@@ -12,6 +12,9 @@ git clone https://github.com/tpapagian/linux-4.14.72-spf.git -b fastmap
 The modifications are minimal as they contain only some exported symbols and the addition of 2 fields in a single struct. The specific modification can be found at this [commit](https://github.com/tpapagian/linux-4.14.72-spf/commit/fdca6433c36bad7977ca019470225c54a4ef8fb7).
 
 After that, you should configure, build, and install this kernel using specific instructions based on your setup.
+
+The no kernel modifications branch consists of a patchset so that FastMap can run on any Linux 4.14 kernel without any modifications being necessary. It should work properly,
+however it has not been tested as thoroughly as the main branch.
 
 ## Building FastMap
 
