@@ -7,7 +7,7 @@ This library provides an optimized memory-mapped I/O path inside the Linux kerne
 FastMap currently runs on any 4.14 Linux kernel, with no kernel modifications being necessary. A 4.14 kernel from the Linux Kernel Archives can be found
 [here](https://mirrors.edge.kernel.org/pub/linux/kernel/v4.x/linux-4.14.123.tar.gz).
 
-After that, you should configure, build, and install this kernel using specific instructions based on your setup.
+After that, you should configure, build, and install the kernel using specific instructions based on your setup.
 
 ## Building FastMap
 
