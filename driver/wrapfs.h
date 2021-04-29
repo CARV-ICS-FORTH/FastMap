@@ -59,7 +59,7 @@ extern int wrapfs_interpose(struct dentry *dentry, struct super_block *sb,
 struct wrapfs_file_info {
 	struct file *lower_file;
 	const struct vm_operations_struct *lower_vm_ops;
-	struct pr_vma_data *pvd;
+	struct fastmap_info *fmap_info;
 };
 
 /* wrapfs inode data in memory */

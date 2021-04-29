@@ -161,6 +161,17 @@ struct pr_vma_data
 	unsigned long magic2; // -----
 };
 
+/*
+ * Struct used to encapsulate
+ * fastmap structs required in vm_area_struct,
+ * stored in vm_private_data member
+ */
+struct fastmap_info {
+	bool is_fastmap;
+	struct pr_vma_data *pvd;
+	struct pr_vma_entry *pve;
+};
+
 struct raw_device_data
 {
 	int inuse;

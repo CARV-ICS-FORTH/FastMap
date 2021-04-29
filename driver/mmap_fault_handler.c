@@ -348,8 +348,9 @@ static void dmap_add_or_update_rmap(struct vm_fault *vmf, struct pr_vma_data *pv
 	int i, cpu;
 	int free_entry = -1;
 	struct vm_area_struct *vma = vmf->vma;
+	struct fastmap_info *fmap_info = (struct fastmap_info *)vma->vm_private_data;
 
-	pve = (struct pr_vma_entry *)vma->pve;
+	pve = fmap_info->pve;
 
 	spin_lock(&tagged_page->rmap_lock);
 	for(i = 0; i < MAX_RMAPS_PER_PAGE; i++){
@@ -496,7 +497,7 @@ int perma_getpage(struct vm_area_struct *vma, struct page **pagep, struct vm_fau
 	for(pgid = 0; pgid < PAGES_PER_PGFAULT; pgid++)
 		tagged_page[pgid] = NULL;
 
-	pvd = (struct pr_vma_data *)vma->vm_private_data;
+	pvd = ((struct fastmap_info *)vma->vm_private_data)->pvd
 	DMAP_BGON(pvd == NULL);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,9,0) && LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
@@ -663,8 +664,8 @@ int perma_vma_fault(struct vm_fault *vmf)
 #endif
 
 	//ktime_t t1, t2;
-	DMAP_BGON((struct pr_vma_data *)vma->vm_private_data == NULL);
-	DMAP_BGON(vma->is_fastmap == false);
+	DMAP_BGON((struct fastmap_info *)vma->vm_private_data == NULL);
+	DMAP_BGON(((struct fastmap_info *)vma-vm_private_data)->is_fastmap == false);
 
 	/* vmf->pgoff includes the base value of vma->vm_pgoff, which is how far the vma is into the address region.
 	 * Therefore the vma->vm_pgoff needs to be subtracted off before computing the address */
@@ -783,30 +784,34 @@ void perma_vma_open(struct vm_area_struct *vma)
 {
 	struct pr_vma_entry *pve;
 	struct pr_vma_data *pvd;
+	struct fastmap_info *fmap_info;
 
-	pvd = (struct pr_vma_data *)vma->vm_private_data;
+	fmap_info = (struct fastmap_info *)vma->vm_private_data;
+	DMAP_BGON(fmap_info == NULL);
+
+	pvd = fmap_info->pvd;
 	DMAP_BGON(pvd == NULL);
 	DMAP_BGON((pvd->magic1 != PVD_MAGIC_1) || (pvd->magic2 != PVD_MAGIC_2));
 	DMAP_BGON(pvd->is_valid == false);
 	
 	//printk(KERN_ERR "[%s:%s:%d][%s][%p]\n", __FILE__, __func__, __LINE__, vma->vm_mm->owner->comm, vma);
-
-	if(vma->is_fastmap){
-		DMAP_BGON(vma->pvd == NULL);
-		DMAP_BGON(((struct pr_vma_data *)(vma->pvd))->magic1 != PVD_MAGIC_1);
-		DMAP_BGON(((struct pr_vma_data *)(vma->pvd))->magic2 != PVD_MAGIC_2);
-		DMAP_BGON(((struct pr_vma_data *)(vma->pvd))->is_valid == false);
-		DMAP_BGON(vma->pve == NULL);
-		kref_get(&((struct pr_vma_entry *)vma->pve)->refcount);
+	
+	if(fmap_info->is_fastmap){
+		DMAP_BGON(fmap_info->pvd == NULL);
+		DMAP_BGON(fmap_info->pvd->magic1 != PVD_MAGIC_1);
+		DMAP_BGON(fmap_info->pvd->magic2 != PVD_MAGIC_2);
+		DMAP_BGON(fmap_info->pvd->is_valid == false);
+		DMAP_BGON(fmap_info->pve == NULL);
+		kref_get(&fmap_info->pve->refcount);
 	}else{
 		pve = kmem_cache_alloc(pve_alloc_cache, GFP_ATOMIC);
 		DMAP_BGON(pve == NULL);
 
 		pve->vm_start = vma->vm_start;
 		pve->vm_end = vma->vm_end;
-		vma->is_fastmap = true;
-		vma->pvd = pvd;
-		vma->pve = pve;
+		fmap_info->is_fastmap = true;
+		fmap_info->pvd = pvd;
+		fmap_info->pve = pve;
 	}
 
 	atomic64_inc(&pvd->vma_count);
@@ -857,6 +862,9 @@ static void __pve_release(struct pr_vma_entry *pve)
     pvmw.address = pvr_get_vaddr(pvr);
     pvmw.flags = PVMW_SYNC;
 
+    pvmw.pte = NULL;
+    pvmw.ptl = NULL;
+
     DMAP_BGON(pvmw.vma->vm_mm == NULL);
 
     /* If the pte returned is valid, the lock will also be held. */
@@ -895,8 +903,6 @@ static void pve_release(struct kref *kref)
 	__pve_release(pve);
 }
 
-static void pve_empty(struct kref *kref){}
-
 void perma_vma_close(struct vm_area_struct *vma)
 {
 	//struct pr_vma_data *pvd;
@@ -910,9 +916,9 @@ void perma_vma_close(struct vm_area_struct *vma)
 
 	//printk(KERN_ERR "[%s:%s:%d][%s][%p]\n", __FILE__, __func__, __LINE__, vma->vm_mm->owner->comm, vma);
 
-	DMAP_BGON(vma->is_fastmap == false);
+	DMAP_BGON(((struct fastmap_info *)vma->vm_private_data)->is_fastmap == false);
 	//DMAP_BGON(vma->pvd == NULL);
-	DMAP_BGON(vma->pve == NULL);
+	DMAP_BGON(((struct fastmap_info *)vma->vm_private_data)->pve == NULL);
 
 	//pvd = (struct pr_vma_data *)vma->pvd;
 	//DMAP_BGON(pvd == NULL);
@@ -922,14 +928,12 @@ void perma_vma_close(struct vm_area_struct *vma)
 
 	//DMAP_BGON((pvd->magic1 != PVD_MAGIC_1) || (pvd->magic2 != PVD_MAGIC_2));
 
-	pve = (struct pr_vma_entry *)vma->pve;
+	pve = ((struct fastmap_info *)vma->vm_private_data)->pve;
 	DMAP_BGON(pve == NULL);
 
-	pve_release(&pve->refcount);
-	if(kref_put(&pve->refcount, pve_empty) == 1){ // pve_release called!
-		// FIXME
-		// kmem_cache_free(pve_alloc_cache, pve);
-		// vma->is_fastmap = false;
+	if(kref_put(&pve->refcount, pve_release) == 1){ // pve_release called!
+		 kmem_cache_free(pve_alloc_cache, pve);
+		 ((struct fastmap_info *)vma->vm_private_data)->is_fastmap = false;
 	}
 
 	//atomic64_dec(&pvd->cnt);
@@ -959,6 +963,7 @@ int perma_page_mkwrite(struct vm_fault *vmf)
 	unsigned long page_offset;
 	struct tagged_page *tagged_page;
 	struct pr_vma_data *pvd;
+	struct fastmap_info *fmap_info;
 	struct vm_area_struct *vma = vmf->vma;
 	int tl = -1;
 
@@ -966,7 +971,10 @@ int perma_page_mkwrite(struct vm_fault *vmf)
   atomic_inc(&mm_lf_stat_mkwrites);
 #endif
 
-	pvd = (struct pr_vma_data *)vma->vm_private_data;
+	fmap_info = (struct fastmap_info *)vma->vm_private_data;
+	DMAP_BGON(fmap_info == NULL);
+
+	pvd = fmap_info->pvd;
 	DMAP_BGON(pvd == NULL);
 
 	page_offset = vmf->pgoff;
@@ -1001,7 +1009,7 @@ int perma_page_mkwrite(struct vm_fault *vmf)
 #ifdef USE_MAP_PAGES
 static void dmap_map_pages(struct vm_fault *vmf, struct radix_tree_root *rdx_root, pgoff_t start_pgoff, pgoff_t end_pgoff)
 {
-	struct pr_vma_data *pvd = (struct pr_vma_data *)vmf->vma->pvd;
+	struct pr_vma_data *pvd = ((struct fastmap_info *)vmf->vma->vm_private_data)->pvd;
 	struct radix_tree_iter iter;
 	void **slot;
 	struct file *file = wrapfs_lower_file(vmf->vma->vm_file); //pvd->bk.filp;
@@ -1125,7 +1133,7 @@ next:
 static void perma_map_pages(struct vm_fault *vmf, pgoff_t start_pgoff, pgoff_t end_pgoff)
 {
 	unsigned long addr = vmf->address;
-	struct pr_vma_data *pvd = (struct pr_vma_data *)vmf->vma->pvd;
+	struct pr_vma_data *pvd = ((struct fastmap_info *)vmf->vma->vm_private_data)->pvd;
 	int cpu;
 	bool has_pte = (vmf->pte == NULL)?(false):(true);
 
@@ -1159,9 +1167,16 @@ static const char *perma_name(struct vm_area_struct *vma)
 
 static int perma_split(struct vm_area_struct *area, unsigned long addr)
 {
-	bool fmap = area->is_fastmap;
-	struct pr_vma_entry *pve = (struct pr_vma_entry *)area->pve;
-	struct pr_vma_data *pvd = (struct pr_vma_data *)area->pvd;
+	bool fmap;
+	struct pr_vma_entry *pve;
+	struct pr_vma_data *pvd;
+
+	struct fastmap_info *fmap_info = (struct fastmap_info *)area->vm_private_data;
+	DMAP_BGON(fmap_info == NULL);
+
+	fmap = fmap_info->is_fastmap;
+	pve = fmap_info->pve;
+	pvd = fmap_info->pvd;
 
 	printk(KERN_ERR "[%s:%s:%d]is[%d]pvd[%p]pve[%p]addr[%lu]\n", __FILE__, __func__, __LINE__, fmap, pvd, pve, addr);
 	return 0; 
@@ -1169,7 +1184,7 @@ static int perma_split(struct vm_area_struct *area, unsigned long addr)
 
 static int perma_mremap(struct vm_area_struct *area)
 {
-	struct pr_vma_entry *old_pve = (struct pr_vma_entry *)area->pve;
+	struct pr_vma_entry *old_pve = ((struct fastmap_info *)area->vm_private_data)->pve;
 	struct pr_vma_entry *new_pve = NULL;
 	struct list_head *node;
 	unsigned long diff;
@@ -1231,7 +1246,7 @@ static int perma_mremap(struct vm_area_struct *area)
 	}
 	
 	// We ignore old_pve. Someone else will close it!
-	area->pve = new_pve;
+	((struct fastmap_info *)area->vm_private_data)->pve = new_pve;
 
 	return 0;
 }
@@ -1354,7 +1369,7 @@ int dmap_mmap_blockdev(struct file *filp, struct vm_area_struct *vma)
 
 	/* Disable any system potential readahead for these mappings */
 	vma->vm_flags = (vma->vm_flags & ~VM_SEQ_READ) | VM_RAND_READ;
-	vma->vm_private_data = (struct pr_vma_data *)filp->private_data;
+	vma->vm_private_data = (struct fastmap_info *)filp->private_data;
 	DMAP_BGON(vma->vm_private_data == NULL);
 
 	/* Allow the fault handler to insert pages via vm_insert_page: requires the VM_MIXEDMAP flag */
@@ -1401,7 +1416,7 @@ int dmap_mmap_file(struct file *file, struct vm_area_struct *vma)
 
 	//printk(KERN_ERR "file size = %lu, mmap size = %lu\n", lower_file->f_inode->i_size,  vma->vm_end - vma->vm_start);
 
-	atomic64_set(&((struct wrapfs_file_info *)file->private_data)->pvd->mmaped, 1);
+	atomic64_set(&((struct wrapfs_file_info *)file->private_data)->fmap_info->pvd->mmaped, 1);
 
 	//err = lower_file->f_op->mmap(file, vma); // for ext4 it does not allocate anything
 	//if(err == 0)
@@ -1427,9 +1442,9 @@ int dmap_mmap_file(struct file *file, struct vm_area_struct *vma)
 	/* Disable any system potential readahead for these mappings */
 	vma->vm_flags = (vma->vm_flags & ~VM_SEQ_READ) | VM_RAND_READ;
 	DMAP_BGON(vma->vm_private_data != NULL);
-	vma->vm_private_data = ((struct wrapfs_file_info *)file->private_data)->pvd;
+	vma->vm_private_data = ((struct wrapfs_file_info *)file->private_data)->fmap_info;
 
-	pvd = ((struct wrapfs_file_info *)file->private_data)->pvd;
+	pvd = ((struct wrapfs_file_info *)file->private_data)->fmap_info->pvd;
 	DMAP_BGON(pvd == NULL);
 	pvd->is_mmap = true;
 	check_file_size(pvd);

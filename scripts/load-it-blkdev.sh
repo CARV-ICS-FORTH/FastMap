@@ -12,7 +12,7 @@ modprobe dmap
 
 echo 1 > /sys/class/dmap/0_buffer_state
 
-./ioctl/set ${DEVICE}
+../ioctl/set ${DEVICE}
 
 # At this point a new device /dev/dmap/dmap1 will 
 # appear. Using mmap() on this device will use

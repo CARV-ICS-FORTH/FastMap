@@ -81,7 +81,6 @@ void cleanup_mmap_buffer_data_banked_buffer_t(banked_buffer_t *buf)
 
 	printk(KERN_INFO "Cleaning up data structures for the banked buffer\n");
 	cleanup_mmap_buffer_data(buf->banks);
-	kfree(buf->banks);
 	kfree(buf);
 }
 

@@ -21,4 +21,5 @@ dmap-objs := 	main.o \
 							dmapfs_mmap.o \
 							dmapfs_super.o \
 							lpfifo_non_atomic.o \
-							dfifo_non_atomic.o
+							dfifo_non_atomic.o \
+							kernel_syms.o 
