@@ -903,8 +903,6 @@ static void pve_release(struct kref *kref)
 	__pve_release(pve);
 }
 
-static void pve_empty(struct kref *kref){}
-
 void perma_vma_close(struct vm_area_struct *vma)
 {
 	//struct pr_vma_data *pvd;
@@ -933,11 +931,9 @@ void perma_vma_close(struct vm_area_struct *vma)
 	pve = ((struct fastmap_info *)vma->vm_private_data)->pve;
 	DMAP_BGON(pve == NULL);
 
-	pve_release(&pve->refcount);
-	if(kref_put(&pve->refcount, pve_empty) == 1){ // pve_release called!
-		// FIXME
-		// kmem_cache_free(pve_alloc_cache, pve);
-		// vma->is_fastmap = false;
+	if(kref_put(&pve->refcount, pve_release) == 1){ // pve_release called!
+		 kmem_cache_free(pve_alloc_cache, pve);
+		 ((struct fastmap_info *)vma->vm_private_data)->is_fastmap = false;
 	}
 
 	//atomic64_dec(&pvd->cnt);

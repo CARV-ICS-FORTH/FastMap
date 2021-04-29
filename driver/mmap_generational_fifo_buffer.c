@@ -612,7 +612,8 @@ unsigned int try_purge_pages_fast(fifo_buffer_t *buf, unsigned int N, int qid)
 	unsigned int radix_tree_id;
 #endif
 	//struct tagged_page **pgs = page_address(alloc_page(GFP_KERNEL));
-	struct tagged_page *pgs[192];
+	struct tagged_page **pgs = vmalloc(192 * sizeof(struct tagged_page *));
+	DMAP_BGON(pgs == NULL);
 
 	N = 192;
 
@@ -666,6 +667,7 @@ unsigned int try_purge_pages_fast(fifo_buffer_t *buf, unsigned int N, int qid)
 
 	//free_page((long unsigned int)pgs);
 
+	vfree(pgs);
 	return num_pgs;
 }
 
@@ -869,6 +871,7 @@ fifo_buffer_t *init_mmap_buffer_data_fifo_buffer_t(fifo_buffer_t *dummy, buf_ld_
 
 void cleanup_mmap_buffer_data_fifo_buffer_t(fifo_buffer_t *buf)
 {
+	int i;
 	buf->evictor_run = false;
 	while(atomic_read(&active_evictors) != 0)
 		ssleep(1);
@@ -876,8 +879,10 @@ void cleanup_mmap_buffer_data_fifo_buffer_t(fifo_buffer_t *buf)
 
 	free_hash_table(&buf->page_map);
 
-	kfree(buf->primary_fifo_data);
-	kfree(buf->dirty_queue);
+	for(i=0; i < NUM_QUEUES; i++)
+		kfree(buf->primary_fifo_data[i]);
+	for(i=0; i < EVICTOR_THREADS; i++)
+		kfree(buf->dirty_queue[i]);
 	kfree(buf);
 }
 
