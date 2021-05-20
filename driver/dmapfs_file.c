@@ -41,11 +41,18 @@ spinlock_t ino_pvd_lock;
 struct radix_tree_root ino_pvd_cache;
 
 extern struct lpfifo_operations_struct *lpfifo_ops;
+extern struct dfifo_operations_struct *dfifo_ops;
 
+extern void remove_mappings(struct tagged_page *p, struct evictor_tlb *etlb);
 extern void clear_mappings(struct tagged_page *p, struct evictor_tlb *etlb);
 extern void write_dirty_pages(struct pr_vma_data *pvd, void (*__page_cleanup)(struct tagged_page *));
 extern void write_file_tagged_page(struct tagged_page *evicted_page);
 extern void move_page_d2c_fifo_buffer_t(fifo_buffer_t *buf, struct tagged_page *tagged_page);
+extern unsigned int try_purge_pages_fast(fifo_buffer_t *buf, unsigned int N, int qid);
+extern int fmap_radix_insert(struct pr_vma_data *pvd, unsigned long offset, struct tagged_page *p);
+extern void dmap_do_page_io(struct vm_area_struct *vma, struct pr_vma_data *pvd, struct tagged_page **tagged_page, unsigned long *page_byte_offset, int num_pages);
+extern void dmap_do_tagged_page_writable(struct vm_area_struct *vma, struct pr_vma_data *pvd, struct tagged_page *tagged_page);
+extern struct tagged_page *fmap_radix_lookup(struct pr_vma_data *pvd, unsigned long offset);
 
 void ino_cache_init(void)
 {
@@ -301,18 +308,13 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 	return err;
 }
 
+static void wrapfs_file_release_cb(struct tagged_page *p)
+{
+	move_page_d2c_fifo_buffer_t(buf_data->banks, p);
+}
+
 static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
-	int err;
-
-	struct file *lower_file;
-	struct dentry *dentry = file->f_path.dentry;
-
-#ifdef USE_PERCPU_RADIXTREE
-	const unsigned int cpus = num_online_cpus();
-	unsigned int radix_tree_id;
-#endif
-
 	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
 
 	if(
@@ -320,30 +322,103 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 		&& ( (pvd->magic1 == PVD_MAGIC_1) && (pvd->magic2 == PVD_MAGIC_2) ) 
 		&& ( atomic64_read(&pvd->mmaped) == 1 )
 	){
-		//WARN(atomic64_read(&pvd->cnt) > 0, "[%s:%s:%d][%ld]\n", __FILE__, __func__, __LINE__, atomic64_read(&pvd->cnt));
-		//printk(KERN_ERR "[%s:%s:%d] start = %lld -- end = %llu -- pvd->is_readonly = %u\n", __FILE__, __func__, __LINE__, *ppos, *ppos + count, pvd->is_readonly);
-
 		pgoff_t pgoff_start = *ppos >> PAGE_SHIFT;
 		pgoff_t pgoff_end = (*ppos + count) >> PAGE_SHIFT;
 		pgoff_t i;
 
+		char *cur_buf = (char *)buf;
+		size_t remain = count;
+		unsigned long b = 0;
+		unsigned long o = 0;
+
+		if(count < PAGE_SIZE)
+			printk(KERN_ERR "[%s:%s:%d] start = %lld -- end = %llu -- pvd->is_readonly = %u\n", __FILE__, __func__, __LINE__, *ppos, *ppos + count, pvd->is_readonly);
+
+		if(pgoff_start == pgoff_end)
+			printk(KERN_ERR "[%s:%s:%d] start = %lld -- end = %llu -- pvd->is_readonly = %u\n", __FILE__, __func__, __LINE__, *ppos, *ppos + count, pvd->is_readonly);
+
 		for(i = pgoff_start; i <= pgoff_end; i++){
 			struct tagged_page *tagged_page;
-			
-			rcu_read_lock();
-#ifdef USE_PERCPU_RADIXTREE
-			radix_tree_id = i % cpus;
-			tagged_page = radix_tree_lookup(&(pvd->rdx[radix_tree_id]), i);
-#else
-			tagged_page = radix_tree_lookup(&(pvd->rdx), i);
-#endif
-			if(tagged_page != NULL){
-				printk(KERN_ERR "[%s:%s:%d] start = %lld -- end = %llu -- pvd->is_readonly = %u\n", __FILE__, __func__, __LINE__, *ppos, *ppos + count, pvd->is_readonly);
-			}
-			rcu_read_unlock();
-		}
-	}
+			int rdx_ret;
+			unsigned long page_byte_offset[2] = { 0 };
+			struct tagged_page *tp[2] = { NULL };
+			struct vm_area_struct *vma, __vma;
 
+			vma = &__vma;
+		
+retry_find_page:
+			rcu_read_lock();
+			tagged_page = fmap_radix_lookup(pvd, i);
+			if(tagged_page == NULL){
+				rcu_read_unlock();
+
+				tagged_page = alloc_page_lock(&buf_data->banks->page_map, i, pvd);
+				if(tagged_page == NULL){
+					try_purge_pages_fast(buf_data->banks, 512, get_random_int() % NUM_QUEUES);
+					io_schedule();
+					goto retry_find_page;
+				}
+
+				if(trylock_tp(tagged_page, ULONG_MAX) != 0)
+					DMAP_BGON(1); // it should always manage to lock the page
+
+				rdx_ret = fmap_radix_insert(pvd, i, tagged_page);
+				if(rdx_ret != 0)
+					BUG();
+
+				insert_page_fifo_buffer_t(buf_data->banks, tagged_page, false);
+
+				vma->vm_file = file;
+				page_byte_offset[0] = i << PAGE_SHIFT;
+				tp[0] = tagged_page;
+
+				if( (i == pgoff_start) || (i == pgoff_end) )  
+					dmap_do_page_io(vma, pvd, tp, page_byte_offset, 1);
+				
+				dmap_do_tagged_page_writable(vma, pvd, tagged_page);
+			}else if(tagged_page != NULL){
+				if(trylock_tp(tagged_page, ULONG_MAX) != 0){ // failed to lock page
+					rcu_read_unlock();
+					goto retry_find_page;
+				}
+
+				rcu_read_unlock();
+				if (atomic_read(&tagged_page->is_dirty) == 0) {
+					vma->vm_file = file;
+					dmap_do_tagged_page_writable(vma, pvd, tagged_page);
+				}
+			} //else if(tagged_page != NULL)
+
+			b = 0;
+			o = 0;
+
+			if(i == pgoff_start){ // corner case -- only copy the required
+				if (*ppos % PAGE_SIZE == 0) {
+					b = (remain >= PAGE_SIZE)?(PAGE_SIZE):(remain);
+				} else {
+					if( (i * PAGE_SIZE) > *ppos )
+						BUG();
+
+					o = *ppos - (i * PAGE_SIZE);
+					b = PAGE_SIZE - (unsigned long)o;
+				}
+			}else{
+				b = (remain >= PAGE_SIZE)?(PAGE_SIZE):(remain);
+			}
+
+			if(copy_from_user((void *)((char *)page_to_virt(tagged_page->page) + o), (const void __user *)cur_buf, b))
+				printk(KERN_ERR "[%s:%s:%d] ERROR in copy_from_user()\n", __FILE__, __func__, __LINE__);
+				
+			cur_buf += b;
+			remain -= b;
+
+			atomic_set(&tagged_page->page_valid, 1);
+			unlock_tp(tagged_page);
+		} // for
+	} // if pvd
+
+#if 0
+//no_page:
 	lower_file = wrapfs_lower_file(file);
 	err = vfs_write(lower_file, buf, count, ppos);
 	/* update our inode times+sizes upon a successful lower write */
@@ -353,8 +428,8 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 		fsstack_copy_attr_times(d_inode(dentry),
 					file_inode(lower_file));
 	}
-
-	return err;
+#endif
+	return count;
 }
 
 static int wrapfs_readdir(struct file *file, struct dir_context *ctx)
@@ -574,10 +649,6 @@ static int wrapfs_flush(struct file *file, fl_owner_t id)
 }
 
 
-static void wrapfs_file_release_cb(struct tagged_page *p)
-{
-	move_page_d2c_fifo_buffer_t(buf_data->banks, p);
-}
 
 static void wrapfs_file_fsync_cb(struct tagged_page *p)
 {
@@ -591,11 +662,19 @@ static int wrapfs_file_release(struct inode *inode, struct file *file)
 	int i;
 	struct file *lower_file;
 	struct pr_vma_data *pvd;
-	
+#ifdef USE_PERCPU_RADIXTREE
+	int cpu;
+#endif
+
 	lower_file = wrapfs_lower_file(file);
 
 	pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
 	if(pvd != NULL && pvd->is_mmap == true && pvd->is_valid == true && atomic64_read(&pvd->mmaped) == 1){
+    struct tagged_page *p;
+    void **slot;
+    struct radix_tree_iter iter;
+    pgoff_t start = 0;
+    uint64_t num_frees = 0;
 
 		if(lower_file)
 			((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd->bk.filp = lower_file;
@@ -603,6 +682,59 @@ static int wrapfs_file_release(struct inode *inode, struct file *file)
 			DMAP_BGON(1);
 
 		write_dirty_pages(pvd, wrapfs_file_release_cb);
+
+    // we have to clear radix_tree
+    while(true){
+      p = NULL;
+
+#ifdef USE_PERCPU_RADIXTREE
+      for(cpu = 0; cpu < num_online_cpus(); cpu++){
+        rcu_read_lock();
+        radix_tree_for_each_slot(slot, &pvd->rdx[cpu], &iter, start){
+          p = radix_tree_deref_slot(slot);
+          radix_tree_iter_delete(&pvd->rdx[cpu], &iter, slot);
+          break;
+        }
+        rcu_read_unlock();
+
+        if(p != NULL)
+          break;
+      }
+#else
+      rcu_read_lock();
+      radix_tree_for_each_slot(slot, &pvd->rdx, &iter, start){
+        p = radix_tree_deref_slot(slot);
+        radix_tree_iter_delete(&pvd->rdx, &iter, slot);
+        break;
+      }
+      rcu_read_unlock();
+#endif
+
+      if(p == NULL)
+        break;
+
+      while(trylock_tp(p, ULONG_MAX) != 0)
+        wait_on_page_bit(p->page, PG_locked);
+
+      DMAP_BGON(atomic_read(&p->in_use) == 0);
+
+      if(atomic_read(&p->buffer_id) == BI_CLEAN){
+        spin_lock(&buf_data->banks->primary_fifo_data[p->page->index % NUM_QUEUES]->qlock);
+        lpfifo_ops->remove(buf_data->banks->primary_fifo_data[p->page->index % NUM_QUEUES], p);
+        spin_unlock(&buf_data->banks->primary_fifo_data[p->page->index % NUM_QUEUES]->qlock);
+      }else if(atomic_read(&p->buffer_id) == BI_DIRTY){
+        int id = (p->page->index >> 9) % EVICTOR_THREADS;
+        dfifo_t *dirty_data = buf_data->banks->dirty_queue[id];
+        printk(KERN_ERR "[%s:%s:%d] Why do we have dirty pages here??\n", __FILE__, __func__, __LINE__);
+        spin_lock(&dirty_data->dlock);
+        dfifo_ops->remove(dirty_data, p);
+        spin_unlock(&dirty_data->dlock);
+      }else
+        DMAP_BGON(1);
+
+      free_page_lock(&(buf_data->banks->page_map), p); /* it requires the page locked */
+      num_frees++;
+    }
 
 		for(i = 0; i < MAX_OPEN_FDS; ++i){
 			if(pvd->open_fds[i] == lower_file){
@@ -644,10 +776,12 @@ static int wrapfs_file_release(struct inode *inode, struct file *file)
 
 static int wrapfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
+#if 0
 	int err;
 	struct file *lower_file;
 	struct path lower_path;
 	struct dentry *dentry = file->f_path.dentry;
+#endif
 	struct pr_vma_data *pvd;
 
 	pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
@@ -661,6 +795,7 @@ static int wrapfs_fsync(struct file *file, loff_t start, loff_t end, int datasyn
 	write_dirty_pages(pvd, wrapfs_file_fsync_cb);
 
 mmap_fsync:
+#if 0
 	err = __generic_file_fsync(file, start, end, datasync);
 	if(err)
 		goto out;
@@ -671,7 +806,8 @@ mmap_fsync:
 	wrapfs_put_lower_path(dentry, &lower_path);
 	
 out:
-	return err;
+#endif
+	return 0;
 }
 
 static int wrapfs_fasync(int fd, struct file *file, int flag)
@@ -762,8 +898,23 @@ wrapfs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 		WARN(atomic64_read(&pvd->cnt) > 0, "[%s:%s:%d][%ld]\n", __FILE__, __func__, __LINE__, atomic64_read(&pvd->cnt));
 	}
 #endif
-	
-	printk(KERN_ERR "[%s:%s:%d]\n", __FILE__, __func__, __LINE__);
+
+//	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
+//	if(
+//		(pvd != NULL) 
+//		&& ( (pvd->magic1 == PVD_MAGIC_1) && (pvd->magic2 == PVD_MAGIC_2) ) 
+//		&& ( atomic64_read(&pvd->mmaped) == 1 )
+//	){
+		printk(KERN_ERR "[%s:%s:%d] iocb->ki_pos = %lld, iter->type = %d, iter->iov_offset = %zu, iter->count = %zu\n", 
+			__FILE__, 
+			__func__, 
+			__LINE__,
+			iocb->ki_pos,
+			iter->type,
+			iter->iov_offset,
+			iter->count
+		);
+//	}
 
 	lower_file = wrapfs_lower_file(file);
 	if (!lower_file->f_op->write_iter) {

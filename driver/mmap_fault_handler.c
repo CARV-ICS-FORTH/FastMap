@@ -310,7 +310,7 @@ static void dmap_set_page_priority(struct pr_vma_data *pvd, struct tagged_page *
 #endif
 }
 
-static void dmap_do_page_io(struct vm_area_struct *vma, struct pr_vma_data *pvd, struct tagged_page **tagged_page, unsigned long *page_byte_offset, int num_pages)
+void dmap_do_page_io(struct vm_area_struct *vma, struct pr_vma_data *pvd, struct tagged_page **tagged_page, unsigned long *page_byte_offset, int num_pages)
 {	
 	int pgid, npages = 0;
 
@@ -454,7 +454,7 @@ void dmap_do_tagged_page_writable(struct vm_area_struct *vma, struct pr_vma_data
 		file_update_time(wrapfs_lower_file(vma->vm_file));
 }
 
-static struct tagged_page *fmap_radix_lookup(struct pr_vma_data *pvd, unsigned long offset)
+struct tagged_page *fmap_radix_lookup(struct pr_vma_data *pvd, unsigned long offset)
 {
 #ifdef USE_PERCPU_RADIXTREE
     const unsigned int cpus = num_online_cpus();
@@ -465,7 +465,7 @@ static struct tagged_page *fmap_radix_lookup(struct pr_vma_data *pvd, unsigned l
 #endif
 }
 
-static int fmap_radix_insert(struct pr_vma_data *pvd, unsigned long offset, struct tagged_page *p)
+int fmap_radix_insert(struct pr_vma_data *pvd, unsigned long offset, struct tagged_page *p)
 {
     int ret = -1;
 #ifdef USE_PERCPU_RADIXTREE
@@ -568,7 +568,7 @@ retry_find_page:
 
 			if(trylock_tp(tagged_page[pgid], ULONG_MAX) != 0){ // failed to lock page
 				rcu_read_unlock();
-				wait_on_page_bit(tagged_page[pgid]->page, PG_locked);
+				//wait_on_page_bit(tagged_page[pgid]->page, PG_locked);
 				goto retry_find_page;
 			}
 
