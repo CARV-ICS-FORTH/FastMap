@@ -272,6 +272,8 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 			struct iov_iter iter;
 			struct iovec iov = { .iov_base = buf, .iov_len = count };
 			pgoff_t i;
+			size_t starting_offset = *ppos - pgoff_start, 
+			       ending_length = (*ppos + count) - pgoff_end;
 
 
 			init_sync_kiocb(&kiocb, lower_file);
@@ -283,6 +285,20 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 			err = lower_file->f_op->read_iter(&iocb, &iter);
 			DMAP_BGON(err < 0);
 
+			if(pgoff_start == pgoff_end){
+				rcu_read_lock();
+#ifdef USE_PERCPU_RADIXTREE
+				radix_tree_id = i % cpus;
+				tagged_page = radix_tree_lookup(&(pvd->rdx[radix_tree_id]), pgoff_start);
+#else
+				tagged_page = radix_tree_lookup(&(pvd->rdx), pgoff_start);
+#endif
+				if(tagged_page != NULL)
+					copy_page_to_iter(tagged_page->page, starting_offset, count, &iter);
+				rcu_read_unlock();
+				goto read_done;
+			}
+
 			for(i = pgoff_start; i <= pgoff_end; i++){
 				rcu_read_lock();
 #ifdef USE_PERCPU_RADIXTREE
@@ -292,14 +308,38 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 				tagged_page = radix_tree_lookup(&(pvd->rdx), i);
 #endif
 				if(tagged_page != NULL){
-					/* Cache hit, copy to iov iterator (and consequently buf) */
-					copy_page_to_iter(tagged_page->page, i, PAGE_SIZE, &iter);
+					/* 
+					 * Cache hit, copy to iov iterator (and consequently buf)
+					 * Cases to preserve correct offsets:
+					 *     1) pgoff_start: watch out for offset within initial page
+					 *     2) pgoff_end: watch out for amount of bytes within last page
+					 *     3) offset in between: just copy the entire page
+					 * We also need to be careful if pgoff_start == pgoff_end in which
+					 * case all the data we want is within a single page
+					 */
+					if(i == pgoff_start)
+						copy_page_to_iter(tagged_page->page, starting_offset, PAGE_SIZE - starting_offset,
+								&iter);
+					else if(i == pgoff_end)
+						copy_page_to_iter(tagged_page->page, pgoff_end, ending_length, &iter);
+					else
+						copy_page_to_iter(tagged_page->page, i, PAGE_SIZE, &iter);
+				}else{
+					/* 
+					 * Adjust iov iterator offset in order to copy
+					 * fastmap cache hits to the correct offset within
+					 * the iterator. This stems from the fact that while
+					 * calls to copy_page_to_iter will advance the iov_iter
+					 * offset, we still need to advance it on cache misses
+					 */
+					if(i == pgoff_start)
+						iter->iov_offset += PAGE_SIZE - starting_offset;
+					else if(i != pgoff_end)
+						iter->iov_offset += PAGE_SIZE;
 				}
 				rcu_read_unlock();
 			}
-			fsstack_copy_attr_atime(d_inode(dentry), 
-					file_inode(lower_file));
-			return err;
+			goto read_done;
 		}else{
 
 			if(pgoff_start == pgoff_end){
@@ -349,6 +389,7 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 	lower_file = wrapfs_lower_file(file);
 	err = vfs_read(lower_file, buf, count, ppos);
 	/* update our inode atime upon a successful lower read */
+read_done:
 	if (err >= 0)
 		fsstack_copy_attr_atime(d_inode(dentry),
 					file_inode(lower_file));
@@ -393,6 +434,10 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 			 *	- Invalidate pages if in fastmap cache
 			 *	- Call underlying file write code
 			 */
+			struct iovec iov = { .iov_base = (void __user *)buf, .iov_len = count };
+			struct kiocb kiocb;
+			struct iov_iter iter;
+
 			for(i = pgoff_start; i <= pgoff_end; i++){
 				struct tagged_page *tp;
 				rcu_read_lock();
@@ -450,7 +495,15 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 				}
 			}
 			lower_file = wrapfs_lower_file(file);
-			err = vfs_write(lower_file, buf, count, ppos);
+
+			/* Setup kiocb and iov iterator to call underlying write_iter */
+			init_sync_kiocb(&kiocb, lower_file);
+			kiocb.ki_pos = *ppos;
+			iov_iter_init(&iter, WRITE, &iov, 1, count);
+
+			DMAP_BGON(lower_file->f_op->write_iter == NULL);
+			err = lower_file->f_op->write_iter(&kiocb, &iter);
+
 			/* update our inode times+sizes upon a successful lower write */
 			if (err >= 0) {
 				fsstack_copy_inode_size(d_inode(dentry),
@@ -458,6 +511,7 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 				fsstack_copy_attr_times(d_inode(dentry),
 							file_inode(lower_file));
 			}
+			return err;
 		}else{
 			for(i = pgoff_start; i <= pgoff_end; i++){
 				struct tagged_page *tagged_page;
