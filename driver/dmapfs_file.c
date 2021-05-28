@@ -43,6 +43,8 @@ struct radix_tree_root ino_pvd_cache;
 extern struct lpfifo_operations_struct *lpfifo_ops;
 extern struct dfifo_operations_struct *dfifo_ops;
 
+extern banked_buffer_t *buf_data;
+
 extern void remove_mappings(struct tagged_page *p, struct evictor_tlb *etlb);
 extern void clear_mappings(struct tagged_page *p, struct evictor_tlb *etlb);
 extern void write_dirty_pages(struct pr_vma_data *pvd, void (*__page_cleanup)(struct tagged_page *));
@@ -316,6 +318,7 @@ static void wrapfs_file_release_cb(struct tagged_page *p)
 static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
 	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
+	struct file *lower_file;
 
 	if(
 		(pvd != NULL) 
@@ -337,84 +340,158 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 		if(pgoff_start == pgoff_end)
 			printk(KERN_ERR "[%s:%s:%d] start = %lld -- end = %llu -- pvd->is_readonly = %u\n", __FILE__, __func__, __LINE__, *ppos, *ppos + count, pvd->is_readonly);
 
-		for(i = pgoff_start; i <= pgoff_end; i++){
-			struct tagged_page *tagged_page;
-			int rdx_ret;
-			unsigned long page_byte_offset[2] = { 0 };
-			struct tagged_page *tp[2] = { NULL };
-			struct vm_area_struct *vma, __vma;
-
-			vma = &__vma;
-		
-retry_find_page:
-			rcu_read_lock();
-			tagged_page = fmap_radix_lookup(pvd, i);
-			if(tagged_page == NULL){
-				rcu_read_unlock();
-
-				tagged_page = alloc_page_lock(&buf_data->banks->page_map, i, pvd);
-				if(tagged_page == NULL){
-					try_purge_pages_fast(buf_data->banks, 512, get_random_int() % NUM_QUEUES);
-					io_schedule();
-					goto retry_find_page;
-				}
-
-				if(trylock_tp(tagged_page, ULONG_MAX) != 0)
-					DMAP_BGON(1); // it should always manage to lock the page
-
-				rdx_ret = fmap_radix_insert(pvd, i, tagged_page);
-				if(rdx_ret != 0)
-					BUG();
-
-				insert_page_fifo_buffer_t(buf_data->banks, tagged_page, false);
-
-				vma->vm_file = file;
-				page_byte_offset[0] = i << PAGE_SHIFT;
-				tp[0] = tagged_page;
-
-				if( (i == pgoff_start) || (i == pgoff_end) )  
-					dmap_do_page_io(vma, pvd, tp, page_byte_offset, 1);
-				
-				dmap_do_tagged_page_writable(vma, pvd, tagged_page);
-			}else if(tagged_page != NULL){
-				if(trylock_tp(tagged_page, ULONG_MAX) != 0){ // failed to lock page
+		if(io_is_direct(file)){
+			/* 
+			 * Direct I/O file writes
+			 * Steps taken:
+			 *	- Invalidate pages if in fastmap cache
+			 *	- Call underlying file write_iter code
+			 */
+			for(i = pgoff_start; i <= pgoff_end; i++){
+				struct tagged_page *tp;
+				rcu_read_lock();
+				tp = fmap_radix_lookup(pvd, i);
+				if(tp == NULL){
+					/* Cache miss, just continue */
 					rcu_read_unlock();
-					goto retry_find_page;
+					continue;
+				}else{
+					/* Cache hit, must invalidate */
+
+					lpfifo_t *clean_queue = buf_data->primary_fifo_data[tp->page->index % NUM_QUEUES];
+					dfifo_t *dirty_queue = buf_data->dirty_queue[(tp->page->index >> 9) % EVICTOR_THREADS];
+
+					if(trylock_tp(tp, ULONG_MAX) != 0){ // failed to lock page
+						rcu_read_unlock();
+						i--; /* Decrement iterator to try again at the same offset */
+						continue;
+					}
+
+					rcu_read_unlock();
+					if (atomic_read(&tagged_page->is_dirty) == 0) {
+						/* 
+						 * Page is dirty, must remove from dirty queue, tree
+						 * and drain
+						 */
+						spin_lock(&dirty_queue->dlock);
+						dfifo_ops->remove(dirty_queue, tp);
+						spin_unlock(&dirty_queue->dlock);
+
+						unsigned int dirty_tree = tp->page->index % num_online_cpus();
+						spin_lock(&tp->pvd->tree_lock[dirty_tree]);
+#ifdef USE_RADIX_TREE_FOR_DIRTY
+						radix_tree_delete(&(tp->pvd->dirty_tree[dirty_tree]), tp->page->index);
+#else
+						tagged_rb_erase(&(tp->pvd->dirty_tree[dirty_tree]), tp->page->index);
+#endif
+						spin_unlock(&tp->pvd->tree_lock[dirty_tree]);
+
+						drain_page(tp, buf_data, true);
+						unlock_tp(tp);
+					}else{
+						/*
+						 * Page is clean, remove from clean queue and radix tree
+						 * Check this for possible optimizations, like avoiding 
+						 * list removals and mapping clears
+						 */
+						spin_lock(&clean_queue->qlock);
+						lpfifo_ops->remove(clean_queue, tp);
+						spin_unlock(&clean_queue->qlock);
+
+						drain_page(tp, buf_data, true);
+						unlock_tp(tp);
+					}
 				}
+			}
+			lower_file = wrapfs_lower_file(file);
+			err = vfs_write(lower_file, buf, count, ppos);
+			/* update our inode times+sizes upon a successful lower write */
+			if (err >= 0) {
+				fsstack_copy_inode_size(d_inode(dentry),
+							file_inode(lower_file));
+				fsstack_copy_attr_times(d_inode(dentry),
+							file_inode(lower_file));
+			}
+		}else{
+			for(i = pgoff_start; i <= pgoff_end; i++){
+				struct tagged_page *tagged_page;
+				int rdx_ret;
+				unsigned long page_byte_offset[2] = { 0 };
+				struct tagged_page *tp[2] = { NULL };
+				struct vm_area_struct *vma, __vma;
 
-				rcu_read_unlock();
-				if (atomic_read(&tagged_page->is_dirty) == 0) {
-					vma->vm_file = file;
-					dmap_do_tagged_page_writable(vma, pvd, tagged_page);
-				}
-			} //else if(tagged_page != NULL)
+				vma = &__vma;
+			
+retry_find_page:	
+				rcu_read_lock();
+				tagged_page = fmap_radix_lookup(pvd, i);
+				if(tagged_page == NULL){
+					rcu_read_unlock();
 
-			b = 0;
-			o = 0;
+					tagged_page = alloc_page_lock(&buf_data->banks->page_map, i, pvd);
+					if(tagged_page == NULL){
+						try_purge_pages_fast(buf_data->banks, 512, get_random_int() % NUM_QUEUES);
+						io_schedule();
+						goto retry_find_page;
+					}
 
-			if(i == pgoff_start){ // corner case -- only copy the required
-				if (*ppos % PAGE_SIZE == 0) {
-					b = (remain >= PAGE_SIZE)?(PAGE_SIZE):(remain);
-				} else {
-					if( (i * PAGE_SIZE) > *ppos )
+					if(trylock_tp(tagged_page, ULONG_MAX) != 0)
+						DMAP_BGON(1); // it should always manage to lock the page
+
+					rdx_ret = fmap_radix_insert(pvd, i, tagged_page);
+					if(rdx_ret != 0)
 						BUG();
 
-					o = *ppos - (i * PAGE_SIZE);
-					b = PAGE_SIZE - (unsigned long)o;
+					insert_page_fifo_buffer_t(buf_data->banks, tagged_page, false);
+
+					vma->vm_file = file;
+					page_byte_offset[0] = i << PAGE_SHIFT;
+					tp[0] = tagged_page;
+
+					if( (i == pgoff_start) || (i == pgoff_end) )  
+						dmap_do_page_io(vma, pvd, tp, page_byte_offset, 1);
+					
+					dmap_do_tagged_page_writable(vma, pvd, tagged_page);
+				}else if(tagged_page != NULL){
+					if(trylock_tp(tagged_page, ULONG_MAX) != 0){ // failed to lock page
+						rcu_read_unlock();
+						goto retry_find_page;
+					}
+
+					rcu_read_unlock();
+					if (atomic_read(&tagged_page->is_dirty) == 0) {
+						vma->vm_file = file;
+						dmap_do_tagged_page_writable(vma, pvd, tagged_page);
+					}
+				} //else if(tagged_page != NULL)
+
+				b = 0;
+				o = 0;
+
+				if(i == pgoff_start){ // corner case -- only copy the required
+					if (*ppos % PAGE_SIZE == 0) {
+						b = (remain >= PAGE_SIZE)?(PAGE_SIZE):(remain);
+					} else {
+						if( (i * PAGE_SIZE) > *ppos )
+							BUG();
+
+						o = *ppos - (i * PAGE_SIZE);
+						b = PAGE_SIZE - (unsigned long)o;
+					}
+				}else{
+					b = (remain >= PAGE_SIZE)?(PAGE_SIZE):(remain);
 				}
-			}else{
-				b = (remain >= PAGE_SIZE)?(PAGE_SIZE):(remain);
-			}
 
-			if(copy_from_user((void *)((char *)page_to_virt(tagged_page->page) + o), (const void __user *)cur_buf, b))
-				printk(KERN_ERR "[%s:%s:%d] ERROR in copy_from_user()\n", __FILE__, __func__, __LINE__);
-				
-			cur_buf += b;
-			remain -= b;
+				if(copy_from_user((void *)((char *)page_to_virt(tagged_page->page) + o), (const void __user *)cur_buf, b))
+					printk(KERN_ERR "[%s:%s:%d] ERROR in copy_from_user()\n", __FILE__, __func__, __LINE__);
+					
+				cur_buf += b;
+				remain -= b;
 
-			atomic_set(&tagged_page->page_valid, 1);
-			unlock_tp(tagged_page);
-		} // for
+				atomic_set(&tagged_page->page_valid, 1);
+				unlock_tp(tagged_page);
+			} // for
+		} // if/else direct I/O
 	} // if pvd
 
 #if 0
