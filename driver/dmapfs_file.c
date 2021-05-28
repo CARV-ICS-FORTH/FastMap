@@ -256,34 +256,33 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 
 		pgoff_t pgoff_start = *ppos >> PAGE_SHIFT;
 		pgoff_t pgoff_end = (*ppos + count) >> PAGE_SHIFT;
-	
-		if(pgoff_start == pgoff_end){
-			rcu_read_lock();
-			
-#ifdef USE_PERCPU_RADIXTREE
-			radix_tree_id = pgoff_start % cpus;
-			tagged_page = radix_tree_lookup(&(pvd->rdx[radix_tree_id]), pgoff_start);
-#else
-			tagged_page = radix_tree_lookup(&(pvd->rdx), pgoff_start);
-#endif
-
-			if(tagged_page != NULL){
-				//printk(KERN_ERR "[%s:%s:%d] beg=%lld - end=%llu - readonly = %u pvd = %p ino = %lu\n", __FILE__, __func__, __LINE__, *ppos, *ppos + count, pvd->is_readonly, pvd, pvd->ino);
-
-				/* TODO verify this using access_ok? */
-				if(copy_to_user(buf, (const void *)(((char *)page_to_virt(tagged_page->page)) + *ppos), count)){
-					printk(KERN_ERR "[%s:%s:%d] ERROR in copy_to_user()\n", __FILE__, __func__, __LINE__);
-				}
-				
-				file_accessed(lower_file);
-				file_accessed(file);
-			
-				rcu_read_unlock();
-				return count;
-			}
-			rcu_read_unlock();
-		}else{
+		
+		if(is_direct_io(file)){
+			/* 
+			 * Direct I/O guideline:
+			 *	- Configure a kiocb, iov_iter pair
+			 *	- Call underlying fs read_iter to perform
+			 *	  direct I/O from disk
+			 *	- Scan the page range and copy fastmap
+			 *	  page cache hits in iov_iter to replace stale
+			 *	  device data
+			 *	- Copy to buffer and return
+			 */
+			struct kiocb iocb;
+			struct iov_iter iter;
+			struct iovec iov = { .iov_base = buf, .iov_len = count };
 			pgoff_t i;
+
+
+			init_sync_kiocb(&kiocb, lower_file);
+			kiocb.ki_pos = *ppos;
+			iov_iter_init(&iter, READ, &iov, 1, count);
+
+			DMAP_BGON(lower_file->f_op->read_iter == NULL);
+
+			err = lower_file->f_op->read_iter(&iocb, &iter);
+			DMAP_BGON(err < 0);
+
 			for(i = pgoff_start; i <= pgoff_end; i++){
 				rcu_read_lock();
 #ifdef USE_PERCPU_RADIXTREE
@@ -293,9 +292,56 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 				tagged_page = radix_tree_lookup(&(pvd->rdx), i);
 #endif
 				if(tagged_page != NULL){
-					printk(KERN_ERR "[%s:%s:%d] beg=%lld - end=%llu - readonly = %u pvd = %p ino = %lu\n", __FILE__, __func__, __LINE__, *ppos, *ppos + count, pvd->is_readonly, pvd, pvd->ino);
+					/* Cache hit, copy to iov iterator (and consequently buf) */
+					copy_page_to_iter(tagged_page->page, i, PAGE_SIZE, &iter);
 				}
 				rcu_read_unlock();
+			}
+			fsstack_copy_attr_atime(d_inode(dentry), 
+					file_inode(lower_file));
+			return err;
+		}else{
+
+			if(pgoff_start == pgoff_end){
+				rcu_read_lock();
+				
+#ifdef USE_PERCPU_RADIXTREE
+				radix_tree_id = pgoff_start % cpus;
+				tagged_page = radix_tree_lookup(&(pvd->rdx[radix_tree_id]), pgoff_start);
+#else
+				tagged_page = radix_tree_lookup(&(pvd->rdx), pgoff_start);
+#endif
+
+				if(tagged_page != NULL){
+					//printk(KERN_ERR "[%s:%s:%d] beg=%lld - end=%llu - readonly = %u pvd = %p ino = %lu\n", __FILE__, __func__, __LINE__, *ppos, *ppos + count, pvd->is_readonly, pvd, pvd->ino);
+
+					/* TODO verify this using access_ok? */
+					if(copy_to_user(buf, (const void *)(((char *)page_to_virt(tagged_page->page)) + *ppos), count)){
+						printk(KERN_ERR "[%s:%s:%d] ERROR in copy_to_user()\n", __FILE__, __func__, __LINE__);
+					}
+					
+					file_accessed(lower_file);
+					file_accessed(file);
+				
+					rcu_read_unlock();
+					return count;
+				}
+				rcu_read_unlock();
+			}else{
+				pgoff_t i;
+				for(i = pgoff_start; i <= pgoff_end; i++){
+					rcu_read_lock();
+#ifdef U	SE_PERCPU_RADIXTREE
+					radix_tree_id = i % cpus;
+					tagged_page = radix_tree_lookup(&(pvd->rdx[radix_tree_id]), i);
+#else
+					tagged_page = radix_tree_lookup(&(pvd->rdx), i);
+#endif
+					if(tagged_page != NULL){
+						printk(KERN_ERR "[%s:%s:%d] beg=%lld - end=%llu - readonly = %u pvd = %p ino = %lu\n", __FILE__, __func__, __LINE__, *ppos, *ppos + count, pvd->is_readonly, pvd, pvd->ino);
+					}
+					rcu_read_unlock();
+				}
 			}
 		}
 	}
@@ -345,7 +391,7 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 			 * Direct I/O file writes
 			 * Steps taken:
 			 *	- Invalidate pages if in fastmap cache
-			 *	- Call underlying file write_iter code
+			 *	- Call underlying file write code
 			 */
 			for(i = pgoff_start; i <= pgoff_end; i++){
 				struct tagged_page *tp;
