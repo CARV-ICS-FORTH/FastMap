@@ -283,7 +283,9 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 			DMAP_BGON(lower_file->f_op->read_iter == NULL);
 
 			err = lower_file->f_op->read_iter(&iocb, &iter);
-			DMAP_BGON(err < 0);
+
+			if(err < 0)
+				goto read_done;
 
 			if(pgoff_start == pgoff_end){
 				rcu_read_lock();
@@ -321,9 +323,9 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 						copy_page_to_iter(tagged_page->page, starting_offset, PAGE_SIZE - starting_offset,
 								&iter);
 					else if(i == pgoff_end)
-						copy_page_to_iter(tagged_page->page, pgoff_end, ending_length, &iter);
+						copy_page_to_iter(tagged_page->page, 0, ending_length, &iter);
 					else
-						copy_page_to_iter(tagged_page->page, i, PAGE_SIZE, &iter);
+						copy_page_to_iter(tagged_page->page, 0, PAGE_SIZE, &iter);
 				}else{
 					/* 
 					 * Adjust iov iterator offset in order to copy
