@@ -257,7 +257,7 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 		pgoff_t pgoff_start = *ppos >> PAGE_SHIFT;
 		pgoff_t pgoff_end = (*ppos + count) >> PAGE_SHIFT;
 		
-		if(is_direct_io(file)){
+		if(io_is_direct(file)){
 			/* 
 			 * Direct I/O guideline:
 			 *	- Configure a kiocb, iov_iter pair
@@ -276,7 +276,7 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 			       ending_length = (*ppos + count) - pgoff_end;
 
 
-			init_sync_kiocb(&kiocb, lower_file);
+			init_sync_kiocb(&iocb, lower_file);
 			kiocb.ki_pos = *ppos;
 			iov_iter_init(&iter, READ, &iov, 1, count);
 
@@ -335,9 +335,9 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 					 * offset, we still need to advance it on cache misses
 					 */
 					if(i == pgoff_start)
-						iter->iov_offset += PAGE_SIZE - starting_offset;
+						iter.iov_offset += PAGE_SIZE - starting_offset;
 					else if(i != pgoff_end)
-						iter->iov_offset += PAGE_SIZE;
+						iter.iov_offset += PAGE_SIZE;
 				}
 				rcu_read_unlock();
 			}
@@ -373,7 +373,7 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 				pgoff_t i;
 				for(i = pgoff_start; i <= pgoff_end; i++){
 					rcu_read_lock();
-#ifdef U	SE_PERCPU_RADIXTREE
+#ifdef USE_PERCPU_RADIXTREE
 					radix_tree_id = i % cpus;
 					tagged_page = radix_tree_lookup(&(pvd->rdx[radix_tree_id]), i);
 #else
@@ -408,6 +408,8 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 {
 	struct pr_vma_data *pvd = ((struct wrapfs_file_info*)file->private_data)->fmap_info->pvd;
 	struct file *lower_file;
+	struct dentry *dentry = file->f_path.dentry;
+	int err = 0;
 
 	if(
 		(pvd != NULL) 
@@ -451,8 +453,8 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 				}else{
 					/* Cache hit, must invalidate */
 
-					lpfifo_t *clean_queue = buf_data->primary_fifo_data[tp->page->index % NUM_QUEUES];
-					dfifo_t *dirty_queue = buf_data->dirty_queue[(tp->page->index >> 9) % EVICTOR_THREADS];
+					lpfifo_t *clean_queue = &buf_data->primary_fifo_data[tp->page->index % NUM_QUEUES];
+					dfifo_t *dirty_queue = &buf_data->dirty_queue[(tp->page->index >> 9) % EVICTOR_THREADS];
 
 					if(trylock_tp(tp, ULONG_MAX) != 0){ // failed to lock page
 						rcu_read_unlock();
@@ -461,7 +463,8 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 					}
 
 					rcu_read_unlock();
-					if (atomic_read(&tagged_page->is_dirty) == 0) {
+					if (atomic_read(&tp->is_dirty) == 0) {
+						unsigned int dirty_tree = tp->page->index % num_online_cpus();
 						/* 
 						 * Page is dirty, must remove from dirty queue, tree
 						 * and drain
@@ -470,7 +473,6 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 						dfifo_ops->remove(dirty_queue, tp);
 						spin_unlock(&dirty_queue->dlock);
 
-						unsigned int dirty_tree = tp->page->index % num_online_cpus();
 						spin_lock(&tp->pvd->tree_lock[dirty_tree]);
 #ifdef USE_RADIX_TREE_FOR_DIRTY
 						radix_tree_delete(&(tp->pvd->dirty_tree[dirty_tree]), tp->page->index);

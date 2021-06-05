@@ -98,4 +98,6 @@ void init_specific_counters_fifo_buffer_t(fifo_buffer_t *buf);
 void move_page_c2d_fifo_buffer_t(fifo_buffer_t *buf, struct tagged_page *tagged_page);
 void move_page_d2c_fifo_buffer_t(fifo_buffer_t *buf, struct tagged_page *tagged_page);
 
+void drain_page(struct tagged_page *drained_page, fifo_buffer_t *buf, bool page_locked);
+
 #endif /* _PERMA_MMAP_GENERATIONAL_FIFO_BUFFER_H_ */
