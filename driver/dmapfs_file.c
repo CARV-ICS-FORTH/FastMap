@@ -277,7 +277,7 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 
 
 			init_sync_kiocb(&iocb, lower_file);
-			kiocb.ki_pos = *ppos;
+			iocb.ki_pos = *ppos;
 			iov_iter_init(&iter, READ, &iov, 1, count);
 
 			DMAP_BGON(lower_file->f_op->read_iter == NULL);
@@ -453,8 +453,8 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 				}else{
 					/* Cache hit, must invalidate */
 
-					lpfifo_t *clean_queue = &buf_data->primary_fifo_data[tp->page->index % NUM_QUEUES];
-					dfifo_t *dirty_queue = &buf_data->dirty_queue[(tp->page->index >> 9) % EVICTOR_THREADS];
+					lpfifo_t *clean_queue = buf_data->banks->primary_fifo_data[tp->page->index % NUM_QUEUES];
+					dfifo_t *dirty_queue = buf_data->banks->dirty_queue[(tp->page->index >> 9) % EVICTOR_THREADS];
 
 					if(trylock_tp(tp, ULONG_MAX) != 0){ // failed to lock page
 						rcu_read_unlock();
@@ -481,7 +481,7 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 #endif
 						spin_unlock(&tp->pvd->tree_lock[dirty_tree]);
 
-						drain_page(tp, buf_data, true);
+						drain_page(tp, buf_data->banks, true);
 						unlock_tp(tp);
 					}else{
 						/*
@@ -493,7 +493,7 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 						lpfifo_ops->remove(clean_queue, tp);
 						spin_unlock(&clean_queue->qlock);
 
-						drain_page(tp, buf_data, true);
+						drain_page(tp, buf_data->banks, true);
 						unlock_tp(tp);
 					}
 				}
