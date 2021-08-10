@@ -251,7 +251,7 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 	if(
 		(pvd != NULL) 
 		&& ( (pvd->magic1 == PVD_MAGIC_1) && (pvd->magic2 == PVD_MAGIC_2) ) 
-		&& ( atomic64_read(&pvd->mmaped) == 1 )
+		//&& ( atomic64_read(&pvd->mmaped) == 1 )
 	){
 
 		pgoff_t pgoff_start = *ppos >> PAGE_SHIFT;
@@ -272,8 +272,8 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 			struct iov_iter iter;
 			struct iovec iov = { .iov_base = buf, .iov_len = count };
 			pgoff_t i;
-			size_t starting_offset = *ppos - pgoff_start, 
-			       ending_length = (*ppos + count) - pgoff_end;
+			size_t starting_offset = *ppos - (pgoff_start << PAGE_SHIFT), 
+			       ending_length = (*ppos + count) - (pgoff_end << PAGE_SHIFT);
 
 
 			init_sync_kiocb(&iocb, lower_file);
@@ -290,13 +290,14 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 			if(pgoff_start == pgoff_end){
 				rcu_read_lock();
 #ifdef USE_PERCPU_RADIXTREE
-				radix_tree_id = i % cpus;
+				radix_tree_id = pgoff_start % cpus;
 				tagged_page = radix_tree_lookup(&(pvd->rdx[radix_tree_id]), pgoff_start);
 #else
 				tagged_page = radix_tree_lookup(&(pvd->rdx), pgoff_start);
 #endif
 				if(tagged_page != NULL)
 					copy_page_to_iter(tagged_page->page, starting_offset, count, &iter);
+				
 				rcu_read_unlock();
 				goto read_done;
 			}
@@ -335,9 +336,9 @@ static ssize_t wrapfs_read(struct file *file, char __user *buf, size_t count, lo
 					 * offset, we still need to advance it on cache misses
 					 */
 					if(i == pgoff_start)
-						iter.iov_offset += PAGE_SIZE - starting_offset;
+						iov_iter_advance(&iter, PAGE_SIZE - starting_offset);
 					else if(i != pgoff_end)
-						iter.iov_offset += PAGE_SIZE;
+						iov_iter_advance(&iter, PAGE_SIZE);
 				}
 				rcu_read_unlock();
 			}
@@ -413,8 +414,8 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 
 	if(
 		(pvd != NULL) 
-		&& ( (pvd->magic1 == PVD_MAGIC_1) && (pvd->magic2 == PVD_MAGIC_2) ) 
-		&& ( atomic64_read(&pvd->mmaped) == 1 )
+		&& ( (pvd->magic1 == PVD_MAGIC_1) && (pvd->magic2 == PVD_MAGIC_2) )
+		//&& ( atomic64_read(&pvd->mmaped) == 1 )
 	){
 		pgoff_t pgoff_start = *ppos >> PAGE_SHIFT;
 		pgoff_t pgoff_end = (*ppos + count) >> PAGE_SHIFT;
@@ -463,7 +464,7 @@ static ssize_t wrapfs_write(struct file *file, const char __user *buf, size_t co
 					}
 
 					rcu_read_unlock();
-					if (atomic_read(&tp->is_dirty) == 0) {
+					if (atomic_read(&tp->is_dirty) == 1) {
 						unsigned int dirty_tree = tp->page->index % num_online_cpus();
 						/* 
 						 * Page is dirty, must remove from dirty queue, tree
