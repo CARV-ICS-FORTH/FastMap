@@ -395,7 +395,7 @@ static int raw_release(struct inode *inode, struct file *filp)
 static long raw_ioctl(struct file *filp, unsigned int command, unsigned long arg)
 {
 	int retval = 0;
-	struct pr_vma_data *pvd = (struct pr_vma_data *)filp->private_data;
+	struct pr_vma_data *pvd = ((struct fastmap_info *)filp->private_data)->pvd;
 	struct raw_device_data *rdd = pvd->meta.rdd;
 	struct block_device *bdev = pvd->bk.bdev;
 #if 0
