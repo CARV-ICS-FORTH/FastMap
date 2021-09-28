@@ -104,6 +104,8 @@ extern void write_dirty_pages(struct pr_vma_data *pvd, void (*__page_cleanup)(st
 extern void ino_cache_init(void);
 extern int acquire_ksyms(void);
 
+extern void init_numa_distance_vector(void);
+
 #ifdef USE_HUGEPAGES
 struct page *hugepages[16];
 spinlock_t hugepages_lock;
@@ -951,6 +953,7 @@ static char *raw_devnode(struct device *dev, umode_t *mode)
 int reset_device_parameters(void)
 {
 	int err;
+	init_numa_distance_vector();
 	err = reset_mmap_params(&dimmap_buffer.ld_params);
 	if (err)
 	{

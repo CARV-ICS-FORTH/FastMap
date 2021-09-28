@@ -11,6 +11,7 @@
 #include "mmap_buffer_rbtree.h"
 #include "shared_defines.h"
 
+#if 0
 #if NUM_FREELISTS == 32
 static const int __rand[NUM_FREELISTS][NUM_FREELISTS] = {
 	{ 28, 1, 18, 6, 29, 0, 16, 5, 8, 23, 20, 2, 3, 21, 4, 13, 10, 9, 27, 15, 14, 30, 7, 11, 22, 24, 31, 25, 19, 26, 17, 12 },
@@ -135,6 +136,8 @@ static const int __rand[NUM_FREELISTS][NUM_FREELISTS] = {
 #error "NUM_FREELISTS number is not supported!"
 #endif
 
+#endif /* #if 0 */
+
 #if 0
 static int __r[NUM_FREELISTS][NUM_FREELISTS] __read_mostly;
 
@@ -161,6 +164,54 @@ static void generate_rand(void)
 }
 #endif
 
+/* 
+ * NUMA node distance vector
+ * 2D array of size NUMA nodes * NUMA nodes
+ * (implemented as single dimension )
+ * Each "row" corresponds to one node,
+ * and the "columns" are node numbers sorted by
+ * increasing distance to the row node
+ */
+static int *__NUMA_DV__;
+
+/* Initialization function called once from reset_device_parameters (main.c) */
+void init_numa_distance_vector(void)
+{
+	int nodes = num_online_nodes(), j, k, l;
+
+	/* Create NUMA distance map per node */
+	__NUMA_DV__ = (int *)vmalloc(nodes * nodes * sizeof(int));
+	DMAP_BGON(__NUMA_DV__ == NULL);
+
+	/* Initialize NUMA distance array based on increasing distance */
+	for(j=0;j<nodes;j++){
+		int temp;
+		/* Initialize row with distances to sort */
+		for(k=0;k<nodes;k++)
+			__NUMA_DV__[j * nodes + k] = k;
+
+		/* 
+		 * Now sort based on increasing distance 
+		 * Insertion sort is used because it is
+		 * good with small arrays
+		 */
+		k = 1;
+		while(k < nodes){
+			l = k;
+			while(l > 0 && 
+				node_distance(j, __NUMA_DV__[j * nodes + l -1]) > 
+				node_distance(j, __NUMA_DV__[j * nodes + l]))
+			{
+				temp = __NUMA_DV__[j * nodes + l - 1];
+				__NUMA_DV__[j * nodes + l - 1] = __NUMA_DV__[j * nodes + l];
+				__NUMA_DV__[j * nodes + l] = temp;
+				l--;
+			}
+			k++;
+		}
+	}
+}
+
 void init_hash_table_free_pages(buffer_map_t *page_map, long num_free_pages)
 {
 	long i;
@@ -174,15 +225,19 @@ void init_hash_table_free_pages(buffer_map_t *page_map, long num_free_pages)
 
 	/* Allocate the array of struct tagged_page data structures. Use vmalloc to get a large, virtually contiguous array */
 	page_map->pages = (struct tagged_page *)vmalloc(sizeof(struct tagged_page) * num_free_pages); 
+	page_map->fl = (struct list_head *)vmalloc(ncpus * sizeof(struct list_head));
+	page_map->fl_lock = (spinlock_t *)vmalloc(ncpus * sizeof(spinlock_t));
 
 	DMAP_BGON(page_map->pages == NULL);
+	DMAP_BGON(page_map->fl == NULL);
+	DMAP_BGON(page_map->fl_lock == NULL);
 	printk(KERN_ERR "Done with vmalloc...");
 
 #if NUM_FREELISTS == 1
 	INIT_LIST_HEAD(&page_map->fl);
 	spin_lock_init(&page_map->fl_lock);
 #else
-	for(cpu = 0; cpu < NUM_FREELISTS; ++cpu){
+	for(cpu = 0; cpu < ncpus; ++cpu){
 		INIT_LIST_HEAD(&page_map->fl[cpu]);
 		spin_lock_init(&page_map->fl_lock[cpu]);
 	}
@@ -210,7 +265,7 @@ void init_hash_table_free_pages(buffer_map_t *page_map, long num_free_pages)
 		for(i = cpu * num_pages_percpu; i < ((cpu + 1) * num_pages_percpu); i++){
 			tmp = &page_map->pages[i];
 			init_tagged_page_meta_data(tmp);
-			alloc_tagged_page_data(tmp);
+			alloc_tagged_page_data(tmp, cpu);
 
 			spin_lock(&page_map->fl_lock[cpu]);
 			list_add_tail(&tmp->free, &page_map->fl[cpu]);
@@ -252,6 +307,10 @@ void free_hash_table(buffer_map_t *page_map)
 			free_tagged_page_data(tmp);
 		}
 	}
+	if(__NUMA_DV__ != NULL){
+		vfree(__NUMA_DV__);
+		__NUMA_DV__ = NULL;
+	}
 #endif
 	vfree(page_map->pages);
 }
@@ -260,7 +319,8 @@ struct tagged_page *alloc_page_lock(buffer_map_t *page_map, pgoff_t page_offset,
 {
   struct tagged_page *tagged_page = NULL;
 #if NUM_FREELISTS > 1
-	const int cpuid = smp_processor_id();
+  int nodeid = numa_node_id();
+  int nodes = num_online_nodes();
 #endif
 	int i;
 
@@ -276,19 +336,22 @@ struct tagged_page *alloc_page_lock(buffer_map_t *page_map, pgoff_t page_offset,
 	}
 	spin_unlock(&page_map->fl_lock);
 #else
-	for(i = 0; i < NUM_FREELISTS; ++i){
-		const unsigned int cpu = __rand[cpuid][i];
+	for(i = 0; i < nodes;i++){
+		/* Start checking NUMA node CPUs based on increasing distance */
+		const int node = __NUMA_DV__[nodeid * nodes + i];
+		int cpu;
+		for_each_cpu(cpu, cpumask_of_node(node)){
+			spin_lock(&page_map->fl_lock[cpu]);
+			tagged_page = list_first_entry_or_null(&page_map->fl[cpu], struct tagged_page, free);
+			if(tagged_page != NULL){ /* free page found */
+				list_del_init(&tagged_page->free);
+				tagged_page->cpuid = cpu;
+			}
+			spin_unlock(&page_map->fl_lock[cpu]);
 
-		spin_lock(&page_map->fl_lock[cpu]);
-		tagged_page = list_first_entry_or_null(&page_map->fl[cpu], struct tagged_page, free);
-		if(tagged_page != NULL){ /* we found a free page */
-			list_del_init(&tagged_page->free);
-			tagged_page->cpuid = cpu;
+			if(tagged_page != NULL)
+				break;
 		}
-		spin_unlock(&page_map->fl_lock[cpu]);
-
-		if(tagged_page != NULL)
-			break;
 	}
 #endif
 

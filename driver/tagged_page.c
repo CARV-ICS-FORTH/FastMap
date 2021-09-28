@@ -48,7 +48,7 @@ void init_tagged_page_meta_data(struct tagged_page *tagged_page)
 	spin_lock_init(&tagged_page->tp_lock_guard);
 }
 
-void alloc_tagged_page_data(struct tagged_page *tagged_page)
+void alloc_tagged_page_data(struct tagged_page *tagged_page, int cpu)
 {
 	gfp_t gfp_flags;
 	/*
@@ -67,7 +67,7 @@ void alloc_tagged_page_data(struct tagged_page *tagged_page)
 	 * Typically this will be the process that interfaces with the sysfs, i.e. echo.  To get the desired
 	 * NUMA allocation use a command such as: numactl -i 0-3 echo 1 > /sys/class/di-mmap-runtimeA/0_buffer_state
 	 */
-	tagged_page->page = alloc_page(gfp_flags);
+	tagged_page->page = alloc_pages_node(cpu_to_node(cpu), gfp_flags, 0);
 	DMAP_BGON(tagged_page->page == NULL);
 	SetPageReserved(tagged_page->page);
 
