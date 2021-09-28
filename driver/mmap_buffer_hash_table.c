@@ -217,7 +217,7 @@ void init_hash_table_free_pages(buffer_map_t *page_map, long num_free_pages)
 	long i;
 	struct tagged_page *tmp;
 #if NUM_FREELISTS > 1
-	int cpu, ncpus = NUM_FREELISTS;
+	int cpu, ncpus = num_online_cpus();
 	long num_pages_percpu;
 #endif
 
@@ -261,12 +261,11 @@ void init_hash_table_free_pages(buffer_map_t *page_map, long num_free_pages)
 	DMAP_BGON(num_free_pages % ncpus != 0);
 	num_pages_percpu = num_free_pages / ncpus;
 
-	for(cpu = 0; cpu < NUM_FREELISTS; ++cpu){
+	for(cpu = 0; cpu < ncpus; ++cpu){
 		for(i = cpu * num_pages_percpu; i < ((cpu + 1) * num_pages_percpu); i++){
 			tmp = &page_map->pages[i];
 			init_tagged_page_meta_data(tmp);
 			alloc_tagged_page_data(tmp, cpu);
-
 			spin_lock(&page_map->fl_lock[cpu]);
 			list_add_tail(&tmp->free, &page_map->fl[cpu]);
 			spin_unlock(&page_map->fl_lock[cpu]);
