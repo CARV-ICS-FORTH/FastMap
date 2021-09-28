@@ -81,7 +81,7 @@ inline struct tagged_page *pvr_get_owner(struct pr_vma_rmap *p);
 
 void clear_tagged_page_meta_data(struct tagged_page *tagged_page);
 void init_tagged_page_meta_data(struct tagged_page *tagged_page);
-void alloc_tagged_page_data(struct tagged_page *tagged_page);
+void alloc_tagged_page_data(struct tagged_page *tagged_page, int cpu);
 void free_tagged_page_data(struct tagged_page *tagged_page);
 int is_tagged_page_in_a_buffer(struct tagged_page *tagged_page, int buffer_id);
 int TaggedPageDirty(struct tagged_page *tagged_page);

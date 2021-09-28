@@ -15,8 +15,8 @@ typedef struct buffer_map_struct
 	struct list_head fl;
 	spinlock_t fl_lock;
 #else
-	struct list_head fl[NUM_FREELISTS];
-	spinlock_t fl_lock[NUM_FREELISTS];
+	struct list_head *fl;
+	spinlock_t *fl_lock;
 #endif
 
 	struct tagged_page *pages;
