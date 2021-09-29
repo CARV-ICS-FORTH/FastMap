@@ -278,7 +278,7 @@ void free_hash_table(buffer_map_t *page_map)
 {
 	struct tagged_page *tmp;
 #if NUM_FREELISTS > 1
-	int cpu;
+	int cpu, ncpus = num_online_cpus();
 #endif
 
 	if(page_map == NULL){
@@ -296,7 +296,7 @@ void free_hash_table(buffer_map_t *page_map)
 		free_tagged_page_data(tmp);
 	}
 #else
-	for(cpu = 0; cpu < NUM_FREELISTS; ++cpu){
+	for(cpu = 0; cpu < ncpus; ++cpu){
 		while(!list_empty_careful(&page_map->fl[cpu])){
 			spin_lock(&page_map->fl_lock[cpu]);
 			tmp = container_of(page_map->fl[cpu].next, struct tagged_page, free);
